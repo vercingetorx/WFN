@@ -51,11 +51,11 @@ def apply_random_noise(image, preset="light"):
     elif noise_mode == 1: # Poisson
         return apply_poisson_noise(image, preset=preset)
     else:                 # structured noises
-        gradient_mode = random.randint(0, 2)
+        gradient_mode = random.randint(0, 3)
         if   gradient_mode == 0: return apply_perlin_noise(image, preset=preset)
         elif gradient_mode == 1: return apply_simplex_noise(image, preset=preset)
-        else:                    return apply_value_noise(image, preset=preset)
-
+        elif gradient_mode == 2: return apply_value_noise(image, preset=preset)
+        else:                    return apply_spread_noise(image)
 
 def apply_random_denoise(image, preset="light"):
     denoise_mode = random.choice(["bilateral", "nlmeans", "median"])
@@ -268,15 +268,17 @@ def augment_image(orig_img, augmentations):
     apply_degradations = random.random() < 0.9
 
     if apply_degradations:
+
         # --- Stage 1: Pre-Downsampling Degradations (Simulating "Original Source" Artifacts) ---
-        if random.random() < 0.5: # 50% chance to apply pre-blur
+        if augmentations.blur and random.random() < 0.5: # 50% chance to apply pre-blur
             augmented_img = apply_random_blur(augmented_img, preset=augmentations.preset)
 
-        if random.random() < 0.5: # 50% chance to apply pre-noise
-            if random.random() < 0.5:
-                augmented_img = apply_spread_noise(augmented_img, amount=random.randint(1, 3))
-            else:
-                augmented_img = apply_poisson_noise(augmented_img, preset=augmentations.preset)
+        if augmentations.noise and random.random() < 0.5: # 50% chance to apply pre-noise
+            augmented_img = apply_poisson_noise(augmented_img, preset=augmentations.preset)
+        
+        # denoise
+        if augmentations.denoise and random.random() < 0.3:
+            augmented_img = apply_random_denoise(augmented_img)
 
         if random.random() < 0.7: # 70% chance of initial compression
             qlt = random.randint(40, 100)
@@ -295,13 +297,13 @@ def augment_image(orig_img, augmentations):
 
     if apply_degradations:
         # --- Stage 3: Post-Downsampling Degradations (Simulating "In-the-Wild" Artifacts) ---
-        if random.random() < 0.5: # 50% chance to apply post-blur
+        if augmentations.blur and random.random() < 0.5: # 50% chance to apply post-blur
             augmented_img = apply_random_blur(augmented_img, preset=augmentations.preset)
 
-        if random.random() < 0.5: # 50% chance to apply post-noise
+        if augmentations.noise and random.random() < 0.5: # 50% chance to apply post-noise
             augmented_img = apply_random_noise(augmented_img, preset=augmentations.preset)
 
-        if random.random() < 0.3: # 30% chance of denoising
+        if augmentations.denoise and random.random() < 0.3: # 30% chance of denoising
             augmented_img = apply_random_denoise(augmented_img, preset=augmentations.preset)
 
         if random.random() < 0.15:
@@ -310,7 +312,7 @@ def augment_image(orig_img, augmentations):
         if random.random() < 0.1:
             augmented_img = oversharpen(augmented_img)
 
-        if random.random() < 0.8: # 80% chance of final compression
+        if augmentations.compress and random.random() < 0.8: # 80% chance of final compression
             if random.random() < 0.5:
                 augmented_img = multi_jpeg_compress(augmented_img)
             else:
@@ -333,7 +335,8 @@ class Augmentations:
         denoise = False,
         jpeg=False,
         webp=False,
-        mixed_compression=False, # jpeg + webp
+        compress=False, # jpeg or webp
+        mixed_compression=False, # jpeg and webp
         downsample=1, # downsample 2 for 2x upscale, 4 for 4x etc.
         preset="light"
     ):
@@ -345,6 +348,7 @@ class Augmentations:
         self.denoise = denoise                                    # denoise to 50% of images
         self.jpeg = jpeg                                          # jpeg compress 50% of images
         self.webp = webp                                          # webp compress 50% of images
+        self.compress = compress
         self.mixed_compression = mixed_compression                # randomly compress (jpeg, webp) 50% of images
         self.downsample = downsample                              # downsample by factor n
         self.preset = preset
