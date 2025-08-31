@@ -66,53 +66,55 @@ def train(
         for i, (hr_imgs, lr_imgs) in enumerate(dataloader):
             hr_imgs = hr_imgs.to(device)
             lr_imgs = lr_imgs.to(device)
-        
+
             # -----------------------------
             # PHASE 1: Train Discriminator
             # -----------------------------
             for p in generator.parameters():     p.requires_grad = False
             for p in discriminator.parameters(): p.requires_grad = True
-        
+
             with torch.no_grad():
-                gen_imgs_D, d_vec_D = generator(lr_imgs)
-        
+                gen_imgs_D, d_vec_D = generator(lr_imgs)  # no graph for D phase
+
             real_out = discriminator(hr_imgs,             d_vec_D.detach())
             fake_out = discriminator(gen_imgs_D.detach(), d_vec_D.detach())
-        
-            # If you enabled GP, keep passing these extras; otherwise you can drop them.
-            loss_D, _ = criterion_GAN(
+
+            # Only pass GP extras if it's enabled
+            loss_D = criterion_GAN.d_loss(
                 real_out, fake_out,
-                discriminator=discriminator,
-                real_data=hr_imgs,
-                fake_data=gen_imgs_D.detach(),
-                d_vec=d_vec_D.detach()
+                discriminator=discriminator if criterion_GAN.gradient_penalty else None,
+                real_data=hr_imgs            if criterion_GAN.gradient_penalty else None,
+                fake_data=gen_imgs_D.detach() if criterion_GAN.gradient_penalty else None,
+                d_vec=d_vec_D.detach()       if criterion_GAN.gradient_penalty else None
             )
-        
-            loss_D_scaled = loss_D / accumulation_steps
-            loss_D_scaled.backward()
+
+            (loss_D / accumulation_steps).backward()
             epoch_loss_D += loss_D.item()
-        
+
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataloader):
+                optimizer_D.step()
+                optimizer_D.zero_grad(set_to_none=True)
+
             # -----------------------------
             # PHASE 2: Train Generator
             # -----------------------------
             for p in generator.parameters():     p.requires_grad = True
             for p in discriminator.parameters(): p.requires_grad = False
-        
+
             gen_imgs, d_vec = generator(lr_imgs)
             d_det = d_vec.detach()
-        
-            # Make real path constant for G to avoid reusing D's graph
+
+            # Real path is a constant for G’s loss (don’t build/keep D graph on real)
             with torch.no_grad():
                 real_for_G = discriminator(hr_imgs, d_det)
             fake_for_G = discriminator(gen_imgs, d_det)
-        
-            _, loss_GAN = criterion_GAN(real_for_G, fake_for_G)
-        
+
+            loss_GAN      = criterion_GAN.g_loss(real_for_G, fake_for_G)
             loss_pixel    = criterion_pixelwise(gen_imgs, hr_imgs)
-            loss_SSIM     = criterion_SSIM(gen_imgs, hr_imgs)      # value_range=2 → fine for [-1,1]
+            loss_SSIM     = criterion_SSIM(gen_imgs, hr_imgs)         # value_range=2 works for [-1,1]
             loss_spectral = criterion_spectral(gen_imgs, hr_imgs)
             loss_gradient = criterion_gradient(gen_imgs, hr_imgs)
-        
+
             loss_G_total = (
                 lambda_GAN * loss_GAN
                 + lambda_pixel    * loss_pixel
@@ -120,24 +122,20 @@ def train(
                 + lambda_spectral * loss_spectral
                 + lambda_gradient * loss_gradient
             )
-        
-            loss_G_scaled = loss_G_total / accumulation_steps
-            loss_G_scaled.backward()
-            epoch_loss_G += loss_G_total.item()
-        
-            # -----------------------------
-            # OPTIMIZER STEPS (on boundary)
-            # -----------------------------
-            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataloader):
-                optimizer_D.step(); optimizer_D.zero_grad(set_to_none=True)
-                optimizer_G.step(); optimizer_G.zero_grad(set_to_none=True)
 
-            # --- PSNR Calculation ---
-            batch_psnr = 0.0
-            for j in range(len(hr_imgs)):
-                # Assuming images are in [-1, 1] or [0, 1] range
-                batch_psnr += calculate_psnr(gen_imgs[j], hr_imgs[j], data_range=2.0)
-            epoch_psnr += batch_psnr / len(hr_imgs)
+            (loss_G_total / accumulation_steps).backward()
+            epoch_loss_G += loss_G_total.item()
+
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataloader):
+                optimizer_G.step()
+                optimizer_G.zero_grad(set_to_none=True)
+
+            # --- PSNR (no grad) ---
+            with torch.no_grad():
+                batch_psnr = 0.0
+                for j in range(len(hr_imgs)):
+                    batch_psnr += calculate_psnr(gen_imgs[j].detach(), hr_imgs[j].detach(), data_range=2.0)
+                epoch_psnr += batch_psnr / len(hr_imgs)
         
         if scheduler_G: scheduler_G.step()
         if scheduler_D: scheduler_D.step()
