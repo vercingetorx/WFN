@@ -191,65 +191,64 @@ def resample(img, factor=2):
 ####################################################################
 
 def augment_image(orig_img, augmentations):
-    do_augment = any([augmentations.blur, augmentations.noise, augmentations.jpeg, augmentations.webp, augmentations.mixed_compression])
-    # NOTE: apply augments that will apply to both orig/augmented images
-    
-    # color
+    # --- Stage 0: Initial setup ---
+    # Apply color augmentation to the original image before any degradation
     if augmentations.color and random.random() > 0.5:
         orig_img = apply_random_color(orig_img)
 
-    # NOTE: apply augmentations that only apply to augmented (degraded) image
-    augmented_img = orig_img
+    # Start with a copy of the (potentially color-augmented) original image
+    augmented_img = orig_img.copy()
 
-    # grescale
-    if augmentations.greyscale:
+    # --- Stage 1: Pre-Downsampling Degradations (Simulating "Original Source" Artifacts) ---
+    # These degradations are applied to the high-resolution image before it's downsampled.
+
+    # A. Initial Blur (e.g., lens blur)
+    if augmentations.blur and random.random() < 0.5: # 50% chance to apply pre-blur
+        augmented_img = apply_random_blur(augmented_img, preset="light") # Use a light preset for subtle blur
+
+    # B. Initial Noise (e.g., sensor noise)
+    if augmentations.noise and random.random() < 0.5: # 50% chance to apply pre-noise
+        # Using spread noise as it's a good candidate for subtle, uniform noise
+        augmented_img = apply_spread_noise(augmented_img, amount=random.randint(1, 3))
+
+    # C. First-Pass Compression (e.g., saving the original file)
+    if augmentations.mixed_compression and random.random() < 0.7: # 70% chance of initial compression
+        qlt = random.randint(85, 100) # High quality
+        if random.random() < 0.5:
+            augmented_img = jpeg_compress(augmented_img, qlt=qlt)
+        else:
+            augmented_img = webp_compress(augmented_img, qlt=qlt)
+
+    # --- Stage 2: Downsampling ---
+    if augmentations.downsample > 1:
+        augmented_img = downsample_img_with_random_mode(augmented_img, augmentations.downsample)
+
+    # --- Stage 3: Post-Downsampling Degradations (Simulating "In-the-Wild" Artifacts) ---
+    # These degradations are applied to the now low-resolution image.
+
+    # A. Second-Pass Blur
+    if augmentations.blur and random.random() < 0.5: # 50% chance to apply post-blur
+        augmented_img = apply_random_blur(augmented_img, preset=augmentations.preset)
+
+    # B. Second-Pass Noise
+    if augmentations.noise and random.random() < 0.5: # 50% chance to apply post-noise
+        augmented_img = apply_random_noise(augmented_img, preset=augmentations.preset)
+
+    # C. Denoise (sometimes images are "cleaned" badly)
+    if augmentations.denoise and random.random() < 0.3: # 30% chance of denoising
+        augmented_img = apply_random_denoise(augmented_img, preset=augmentations.preset)
+
+    # D. Final, Aggressive Compression
+    if augmentations.mixed_compression and random.random() < 0.8: # 80% chance of final compression
+        if random.random() < 0.5:
+            augmented_img = multi_jpeg_compress(augmented_img)
+        else:
+            augmented_img = multi_webp_compress(augmented_img)
+
+    # E. Greyscale
+    if augmentations.greyscale and random.random() < 0.1: # 10% chance of greyscale
         augmented_img = convert_image(augmented_img, mode="L", as_rgb=True)
 
-    # downsample
-    # if augmentations.downsample > 1:
-    #     augmented_img = downsample_img_with_random_mode(augmented_img, augmentations.downsample)
-    
-    # initial iso edge noise (underneath other noises and before blurring)
-    if augmentations.noise:
-        augmented_img = apply_spread_noise(augmented_img)
-    
-    # denoise
-    if augmentations.denoise:
-        augmented_img = apply_random_denoise(augmented_img)
-
-    # NOTE: for now just combine denoise with blur as they have similar effects
-    if do_augment and random.random() < 0.7:
-        # blur
-        if augmentations.blur and random.random() < 0.5:
-            if random.random() > 0.5:
-                augmented_img = apply_random_blur(augmented_img, preset=augmentations.preset)
-            else:
-                augmented_img = apply_random_denoise(augmented_img)
-
-        # noise
-        if augmentations.noise and random.random() < 0.5:
-            augmented_img = apply_random_noise(augmented_img, preset=augmentations.preset)
-
-        # jpeg
-        if augmentations.jpeg and random.random() < 0.7:
-            augmented_img = multi_jpeg_compress(augmented_img)
-        
-        # webp
-        elif augmentations.webp and random.random() < 0.7:
-            augmented_img = multi_webp_compress(augmented_img)
-        
-        # mixed compression
-        elif augmentations.mixed_compression and random.random() < 0.7:
-            mode = random.randint(0, 2)
-            if mode == 0:
-                augmented_img = multi_jpeg_compress(augmented_img)
-            elif mode == 1:
-                augmented_img = multi_webp_compress(augmented_img)
-            else:
-                augmented_img = dual_compress(augmented_img)
-    
-    # QUESTION: jpeg compressed webp and webp compressed jpegs?
-    
     return orig_img, augmented_img
 
 ####################################################################

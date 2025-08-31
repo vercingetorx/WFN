@@ -516,17 +516,13 @@ def pil_to_tensor_with_augments(source_img, mode="RGB", normalize=True, augmenta
     """
     transform_list = []
 
-    # Apply augmentations
+    # Apply augmentations (which now include downsampling)
     if augmentations:
         source_img, augmented_img = augment_image(source_img, augmentations)
     
     # Get corresponding random crop
     if crop_size != (0,0):
         source_img, augmented_img = get_random_crop_pair(source_img, augmented_img, crop_size=crop_size)
-    
-    # downsample
-    if augmentations and augmentations.downsample > 1:
-        augmented_img = downsample_img_with_random_mode(augmented_img, augmentations.downsample)
     
     # Apply shared transformations if provided
     if augmentations and augmentations.spatial:
