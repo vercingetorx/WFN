@@ -76,14 +76,14 @@ class PUM(nn.Module):
         num_upsamples = int(math.log2(upscale_factor))
         for _ in range(num_upsamples):
             layers.extend([
-                nn.Conv2d(in_channels, in_channels * 4, kernel_size=3, padding=1, padding_mode="reflect"),
+                nn.Conv2d(in_channels, in_channels * 4, kernel_size=3, padding=1),
                 nn.PixelShuffle(2),
                 nn.GELU(),
                 SpatialWaveNetwork(in_channels, num_heads=num_heads, mlp_ratio=mlp_ratio),
                 ImplicitDetailEnhancer(in_channels, mlp_ratio=mlp_ratio)
             ])
         self.layers = nn.Sequential(*layers)
-        self.final_conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode="reflect")
+        self.final_conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
 
     def forward(self, x):
         x = self.layers(x)
@@ -100,9 +100,9 @@ class MSFEM(nn.Module):
     """
     def __init__(self, in_channels, out_channels):
         super(MSFEM, self).__init__()
-        self.conv3 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode="reflect")
-        self.conv5 = nn.Conv2d(in_channels, out_channels, kernel_size=5, padding=2, padding_mode="reflect")
-        self.conv7 = nn.Conv2d(in_channels, out_channels, kernel_size=7, padding=3, padding_mode="reflect")
+        self.conv3 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv5 = nn.Conv2d(in_channels, out_channels, kernel_size=5, padding=2)
+        self.conv7 = nn.Conv2d(in_channels, out_channels, kernel_size=7, padding=3)
         self.dilated_conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=2, dilation=2)
         self.activation = nn.GELU()
         self.fusion = nn.Conv2d(out_channels * 4, out_channels, kernel_size=1)
@@ -297,13 +297,13 @@ class HighFrequencyProcessorIndependent(nn.Module):
     """
     Processes each high-frequency subband independently for an initial set of blocks.
     """
-    def __init__(self, channels, num_blocks=4, num_heads=4, mlp_ratio=4.0, embed_dim=128, ide_freq=2):
+    def __init__(self, channels, num_blocks=4, num_heads=4, mlp_ratio=4.0, embed_dim=128):
         super(HighFrequencyProcessorIndependent, self).__init__()
         self.msfem = MSFEM(channels, channels)
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
             self.blocks.append(DecoupledBlock(channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, spatial_film=True))
-            if ide_freq > 0 and (i + 1) % ide_freq == 0:
+            if (i + 1) % 2 == 0:
                 self.blocks.append(ImplicitDetailEnhancer(channels, mlp_ratio=mlp_ratio))
 
     def forward(self, x, d):
@@ -317,13 +317,13 @@ class HighFrequencyProcessorFused(nn.Module):
     """
     Processes fused high-frequency features after intermediate fusion.
     """
-    def __init__(self, channels, num_blocks=4, num_heads=4, mlp_ratio=4.0, embed_dim=128, ide_freq=2):
+    def __init__(self, channels, num_blocks=4, num_heads=4, mlp_ratio=4.0, embed_dim=128):
         super(HighFrequencyProcessorFused, self).__init__()
         self.msfem = MSFEM(channels, channels)
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
             self.blocks.append(DecoupledBlock(channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, spatial_film=True))
-            if ide_freq > 0 and (i + 1) % ide_freq == 0:
+            if (i + 1) % 2 == 0:
                 self.blocks.append(ImplicitDetailEnhancer(channels, mlp_ratio=mlp_ratio))
 
     def forward(self, x, d):
@@ -342,7 +342,7 @@ class IntraHighFrequencyFusion(nn.Module):
     """
     def __init__(self, channels, num_heads=4, mlp_ratio=4.0, embed_dim=128):
         super(IntraHighFrequencyFusion, self).__init__()
-        self.weights = torch.softmax(nn.Parameter(torch.ones(3)), dim=0)
+        self.weights = nn.Parameter(torch.ones(3))
         self.conv = nn.Conv2d(channels * 3, channels, kernel_size=1)
         self.act = nn.GELU()
         self.attn = DecoupledBlock(channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, spatial_film=True)
@@ -406,9 +406,7 @@ class WaveFusionNet(nn.Module):
         num_heads=4,
         mlp_ratio=2.0,
         upscale_factor=1,
-        device="cpu",
-        num_hf_indep_ide_freq=2,
-        num_hf_fused_ide_freq=2
+        device="cpu"
     ):
         super(WaveFusionNet, self).__init__()
         self.upscale_factor = upscale_factor
@@ -419,33 +417,23 @@ class WaveFusionNet(nn.Module):
         self.haar = HaarWaveletTransform(in_channels, device=device)
         self.ihaar = InverseHaarWaveletTransform(in_channels, device=device)
 
-        # Decoupled projection and processing for each frequency band
-        self.ll_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
-        self.lh_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
-        self.hl_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
-        self.hh_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
+        # Projection for each subband: since the HAAR transform yields 12 channels (for 3-channel input)
+        # in the order [LL_R, LH_R, HL_R, HH_R, LL_G, LH_G, HL_G, HH_G, LL_B, LH_B, HL_B, HH_B],
+        # we reassemble by frequency:
+        self.subband_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
 
         # Low-frequency processor for the LL subband
-        self.ll_processor = LowFrequencyProcessor(
-            base_channels, num_blocks=num_ll_blocks, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim
-        )
-        # Independent high-frequency processors for each band
-        self.lh_processor_indep = HighFrequencyProcessorIndependent(
-            base_channels, num_blocks=num_hf_indep_blocks, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, ide_freq=num_hf_indep_ide_freq
-        )
-        self.hl_processor_indep = HighFrequencyProcessorIndependent(
-            base_channels, num_blocks=num_hf_indep_blocks, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, ide_freq=num_hf_indep_ide_freq
-        )
-        self.hh_processor_indep = HighFrequencyProcessorIndependent(
-            base_channels, num_blocks=num_hf_indep_blocks, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, ide_freq=num_hf_indep_ide_freq
-        )
+        self.ll_processor = LowFrequencyProcessor(base_channels, num_blocks=num_ll_blocks,
+                                                  num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
+        # High-frequency processing:
+        # Process each high-frequency subband (LH, HL, HH) independently first.
+        self.hf_indep = HighFrequencyProcessorIndependent(base_channels, num_blocks=num_hf_indep_blocks,
+                                                          num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
         # Intermediate fusion for high-frequency features
         self.intra_hf_fusion = IntraHighFrequencyFusion(base_channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
         # Further processing of fused high-frequency features
-        self.hf_fused = HighFrequencyProcessorFused(
-            base_channels, num_blocks=num_hf_fused_blocks,
-            num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, ide_freq=num_hf_fused_ide_freq
-        )
+        self.hf_fused = HighFrequencyProcessorFused(base_channels, num_blocks=num_hf_fused_blocks,
+                                                    num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
 
         # Global fusion: fuse LL features with high-frequency features
         self.global_fusion = GlobalFusion(base_channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
@@ -462,12 +450,12 @@ class WaveFusionNet(nn.Module):
         else:
             self.upsample = nn.Sequential(
                 ImplicitDetailEnhancer(base_channels, mlp_ratio=mlp_ratio),
-                nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1, padding_mode="reflect")
+                nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1)
             )
             self.global_residual = nn.Identity()
 
         # Map features to wavelet coefficient space (expects 4 * in_channels channels)
-        self.out_conv = nn.Conv2d(base_channels, in_channels * 4, kernel_size=3, padding=1, padding_mode="reflect")
+        self.out_conv = nn.Conv2d(base_channels, in_channels * 4, kernel_size=3, padding=1)
         self.act = nn.Tanh()
         self.alpha = nn.Parameter(torch.ones(1))
 
@@ -487,11 +475,16 @@ class WaveFusionNet(nn.Module):
         hl_band = torch.stack([hl_r, hl_g, hl_b], dim=2).flatten(1,2)
         hh_band = torch.stack([hh_r, hh_g, hh_b], dim=2).flatten(1,2)
 
-        # Process subbands with dedicated projection and processing layers
-        ll_feat = self.ll_processor(self.ll_proj(ll_band), d)
-        lh_feat_ind = self.lh_processor_indep(self.lh_proj(lh_band), d)
-        hl_feat_ind = self.hl_processor_indep(self.hl_proj(hl_band), d)
-        hh_feat_ind = self.hh_processor_indep(self.hh_proj(hh_band), d)
+        # Process LL subband:
+        ll_proj = self.subband_proj(ll_band) # [B, base_channels, H/2, W/2]
+        ll_feat = self.ll_processor(ll_proj, d)
+        # Process high-frequency subbands independently:
+        lh_proj = self.subband_proj(lh_band)
+        hl_proj = self.subband_proj(hl_band)
+        hh_proj = self.subband_proj(hh_band)
+        lh_feat_ind = self.hf_indep(lh_proj, d)
+        hl_feat_ind = self.hf_indep(hl_proj, d)
+        hh_feat_ind = self.hf_indep(hh_proj, d)
 
         # Intermediate fusion of high-frequency features:
         hf_fused_initial = self.intra_hf_fusion([lh_feat_ind, hl_feat_ind, hh_feat_ind], d)
@@ -535,5 +528,5 @@ if __name__ == "__main__":
     )
     model.to(device)
     dummy_input = torch.randn(1, 3, 64, 64, device=device)
-    output, d = model(dummy_input)
+    output = model(dummy_input)
     print("Output shape:", output.shape)
