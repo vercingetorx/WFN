@@ -114,7 +114,7 @@ def train(
             loss_gradient = criterion_gradient(gen_imgs, hr_imgs)
         
             loss_G_total = (
-                w_gan * loss_GAN
+                lambda_GAN * loss_GAN
                 + lambda_pixel    * loss_pixel
                 + lambda_SSIM     * loss_SSIM
                 + lambda_spectral * loss_spectral
