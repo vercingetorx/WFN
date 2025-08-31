@@ -66,72 +66,71 @@ def train(
         for i, (hr_imgs, lr_imgs) in enumerate(dataloader):
             hr_imgs = hr_imgs.to(device)
             lr_imgs = lr_imgs.to(device)
-
-            # --------------------------------
-            #  PHASE 1: Train Discriminator
-            # --------------------------------
-            
-            # Freeze generator parameters to save computation
-            for p in generator.parameters(): p.requires_grad = False
+        
+            # -----------------------------
+            # PHASE 1: Train Discriminator
+            # -----------------------------
+            for p in generator.parameters():     p.requires_grad = False
             for p in discriminator.parameters(): p.requires_grad = True
-
-            # Use torch.no_grad() for generator's forward pass in D's training phase
+        
             with torch.no_grad():
-                gen_imgs, d_vec = generator(lr_imgs)
-
-            real_output = discriminator(hr_imgs, d_vec.detach())
-            fake_output = discriminator(gen_imgs.detach(), d_vec.detach())
-            
+                gen_imgs_D, d_vec_D = generator(lr_imgs)
+        
+            real_out = discriminator(hr_imgs,             d_vec_D.detach())
+            fake_out = discriminator(gen_imgs_D.detach(), d_vec_D.detach())
+        
+            # If you enabled GP, keep passing these extras; otherwise you can drop them.
             loss_D, _ = criterion_GAN(
-                real_output, fake_output,
-                discriminator,
-                hr_imgs, gen_imgs.detach(), d_vec.detach()
+                real_out, fake_out,
+                discriminator=discriminator,
+                real_data=hr_imgs,
+                fake_data=gen_imgs_D.detach(),
+                d_vec=d_vec_D.detach()
             )
-            loss_D = loss_D / accumulation_steps
-            loss_D.backward() 
+        
+            loss_D_scaled = loss_D / accumulation_steps
+            loss_D_scaled.backward()
             epoch_loss_D += loss_D.item()
-
-            # --------------------------------
-            #  PHASE 2: Train Generator
-            # --------------------------------
-
-            # Freeze discriminator parameters so only generator's gradients are computed
-            for p in generator.parameters(): p.requires_grad = True
+        
+            # -----------------------------
+            # PHASE 2: Train Generator
+            # -----------------------------
+            for p in generator.parameters():     p.requires_grad = True
             for p in discriminator.parameters(): p.requires_grad = False
-
-            # Run a fresh forward pass for the generator to build the computation graph
+        
             gen_imgs, d_vec = generator(lr_imgs)
-            
-            fake_for_G = discriminator(gen_imgs, d_vec.detach())
-            real_for_G = discriminator(hr_imgs, d_vec.detach())
-
+            d_det = d_vec.detach()
+        
+            # Make real path constant for G to avoid reusing D's graph
+            with torch.no_grad():
+                real_for_G = discriminator(hr_imgs, d_det)
+            fake_for_G = discriminator(gen_imgs, d_det)
+        
             _, loss_GAN = criterion_GAN(real_for_G, fake_for_G)
-            loss_pixel = criterion_pixelwise(gen_imgs, hr_imgs)
-            loss_SSIM = criterion_SSIM(gen_imgs, hr_imgs)
+        
+            loss_pixel    = criterion_pixelwise(gen_imgs, hr_imgs)
+            loss_SSIM     = criterion_SSIM(gen_imgs, hr_imgs)      # value_range=2 → fine for [-1,1]
             loss_spectral = criterion_spectral(gen_imgs, hr_imgs)
             loss_gradient = criterion_gradient(gen_imgs, hr_imgs)
-
-            loss_G = (
-                lambda_GAN * loss_GAN +
-                lambda_pixel * loss_pixel +
-                lambda_SSIM * loss_SSIM +
-                lambda_spectral * loss_spectral +
-                lambda_gradient * loss_gradient
+        
+            loss_G_total = (
+                w_gan * loss_GAN
+                + lambda_pixel    * loss_pixel
+                + lambda_SSIM     * loss_SSIM
+                + lambda_spectral * loss_spectral
+                + lambda_gradient * loss_gradient
             )
-            
-            loss_G = loss_G / accumulation_steps
-            loss_G.backward() 
-            epoch_loss_G += loss_G.item()
-            
-            # --------------------------------
-            #  PHASE 3: Update Weights
-            # --------------------------------
+        
+            loss_G_scaled = loss_G_total / accumulation_steps
+            loss_G_scaled.backward()
+            epoch_loss_G += loss_G_total.item()
+        
+            # -----------------------------
+            # OPTIMIZER STEPS (on boundary)
+            # -----------------------------
             if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataloader):
-                optimizer_D.step()
-                optimizer_G.step()
-                
-                optimizer_D.zero_grad()
-                optimizer_G.zero_grad()
+                optimizer_D.step(); optimizer_D.zero_grad(set_to_none=True)
+                optimizer_G.step(); optimizer_G.zero_grad(set_to_none=True)
 
             # --- PSNR Calculation ---
             batch_psnr = 0.0
