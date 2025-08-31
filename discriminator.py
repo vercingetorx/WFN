@@ -12,10 +12,12 @@ from wave_attn import SpatialWaveNetwork
 # -----------------------------------------------------------------------------
 
 def spectral_conv(*args, **kwargs):
-    return nn.utils.spectral_norm(nn.Conv2d(*args, **kwargs))
+    # return nn.utils.spectral_norm(nn.Conv2d(*args, **kwargs))
+    return nn.Conv2d(*args, **kwargs)
 
 def spectral_linear(*args, **kwargs):
-    return nn.utils.spectral_norm(nn.Linear(*args, **kwargs))
+    # return nn.utils.spectral_norm(nn.Linear(*args, **kwargs))
+    return nn.Linear(*args, **kwargs)
 
 # -----------------------------------------------------------------------------
 # Anti-aliased downsample (BlurPool)
