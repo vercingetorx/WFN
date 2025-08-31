@@ -217,16 +217,16 @@ if __name__ == "__main__":
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=True, num_workers=12)
 
     # optimizers
-    # optimizer_G = optim.AdamW(generator.parameters(), lr=1e-4, betas=(0.9, 0.999))
-    # optimizer_D = optim.AdamW(discriminator.parameters(), lr=5e-5, betas=(0.9, 0.999))
-    optimizer_G = ApolloM(generator.parameters())
-    optimizer_D = ApolloM(discriminator.parameters())
+    optimizer_G = optim.AdamW(generator.parameters(), lr=1e-4, betas=(0.9, 0.999))
+    optimizer_D = optim.AdamW(discriminator.parameters(), lr=5e-5, betas=(0.9, 0.999))
+    # optimizer_G = ApolloM(generator.parameters())
+    # optimizer_D = ApolloM(discriminator.parameters())
 
     # schedulers
-    # scheduler_G = optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=200, eta_min=1e-6)
-    # scheduler_D = optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=200, eta_min=1e-6)
-    scheduler_G = None
-    scheduler_D = None
+    scheduler_G = optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=200, eta_min=1e-6)
+    scheduler_D = optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=200, eta_min=1e-6)
+    # scheduler_G = None
+    # scheduler_D = None
 
     try:
         train(
