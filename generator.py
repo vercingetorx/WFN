@@ -297,13 +297,13 @@ class HighFrequencyProcessorIndependent(nn.Module):
     """
     Processes each high-frequency subband independently for an initial set of blocks.
     """
-    def __init__(self, channels, num_blocks=4, num_heads=4, mlp_ratio=4.0, embed_dim=128):
+    def __init__(self, channels, num_blocks=4, num_heads=4, mlp_ratio=4.0, embed_dim=128, ide_freq=2):
         super(HighFrequencyProcessorIndependent, self).__init__()
         self.msfem = MSFEM(channels, channels)
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
             self.blocks.append(DecoupledBlock(channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, spatial_film=True))
-            if (i + 1) % 2 == 0:
+            if ide_freq > 0 and (i + 1) % ide_freq == 0:
                 self.blocks.append(ImplicitDetailEnhancer(channels, mlp_ratio=mlp_ratio))
 
     def forward(self, x, d):
@@ -317,13 +317,13 @@ class HighFrequencyProcessorFused(nn.Module):
     """
     Processes fused high-frequency features after intermediate fusion.
     """
-    def __init__(self, channels, num_blocks=4, num_heads=4, mlp_ratio=4.0, embed_dim=128):
+    def __init__(self, channels, num_blocks=4, num_heads=4, mlp_ratio=4.0, embed_dim=128, ide_freq=2):
         super(HighFrequencyProcessorFused, self).__init__()
         self.msfem = MSFEM(channels, channels)
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
             self.blocks.append(DecoupledBlock(channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, spatial_film=True))
-            if (i + 1) % 2 == 0:
+            if ide_freq > 0 and (i + 1) % ide_freq == 0:
                 self.blocks.append(ImplicitDetailEnhancer(channels, mlp_ratio=mlp_ratio))
 
     def forward(self, x, d):
@@ -406,7 +406,9 @@ class WaveFusionNet(nn.Module):
         num_heads=4,
         mlp_ratio=2.0,
         upscale_factor=1,
-        device="cpu"
+        device="cpu",
+        num_hf_indep_ide_freq=2,
+        num_hf_fused_ide_freq=2
     ):
         super(WaveFusionNet, self).__init__()
         self.upscale_factor = upscale_factor
@@ -417,23 +419,33 @@ class WaveFusionNet(nn.Module):
         self.haar = HaarWaveletTransform(in_channels, device=device)
         self.ihaar = InverseHaarWaveletTransform(in_channels, device=device)
 
-        # Projection for each subband: since the HAAR transform yields 12 channels (for 3-channel input)
-        # in the order [LL_R, LH_R, HL_R, HH_R, LL_G, LH_G, HL_G, HH_G, LL_B, LH_B, HL_B, HH_B],
-        # we reassemble by frequency:
-        self.subband_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
+        # Decoupled projection and processing for each frequency band
+        self.ll_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
+        self.lh_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
+        self.hl_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
+        self.hh_proj = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
 
         # Low-frequency processor for the LL subband
-        self.ll_processor = LowFrequencyProcessor(base_channels, num_blocks=num_ll_blocks,
-                                                  num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
-        # High-frequency processing:
-        # Process each high-frequency subband (LH, HL, HH) independently first.
-        self.hf_indep = HighFrequencyProcessorIndependent(base_channels, num_blocks=num_hf_indep_blocks,
-                                                          num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
+        self.ll_processor = LowFrequencyProcessor(
+            base_channels, num_blocks=num_ll_blocks, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim
+        )
+        # Independent high-frequency processors for each band
+        self.lh_processor_indep = HighFrequencyProcessorIndependent(
+            base_channels, num_blocks=num_hf_indep_blocks, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, ide_freq=num_hf_indep_ide_freq
+        )
+        self.hl_processor_indep = HighFrequencyProcessorIndependent(
+            base_channels, num_blocks=num_hf_indep_blocks, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, ide_freq=num_hf_indep_ide_freq
+        )
+        self.hh_processor_indep = HighFrequencyProcessorIndependent(
+            base_channels, num_blocks=num_hf_indep_blocks, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, ide_freq=num_hf_indep_ide_freq
+        )
         # Intermediate fusion for high-frequency features
         self.intra_hf_fusion = IntraHighFrequencyFusion(base_channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
         # Further processing of fused high-frequency features
-        self.hf_fused = HighFrequencyProcessorFused(base_channels, num_blocks=num_hf_fused_blocks,
-                                                    num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
+        self.hf_fused = HighFrequencyProcessorFused(
+            base_channels, num_blocks=num_hf_fused_blocks,
+            num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, ide_freq=num_hf_fused_ide_freq
+        )
 
         # Global fusion: fuse LL features with high-frequency features
         self.global_fusion = GlobalFusion(base_channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim)
@@ -475,16 +487,11 @@ class WaveFusionNet(nn.Module):
         hl_band = torch.stack([hl_r, hl_g, hl_b], dim=2).flatten(1,2)
         hh_band = torch.stack([hh_r, hh_g, hh_b], dim=2).flatten(1,2)
 
-        # Process LL subband:
-        ll_proj = self.subband_proj(ll_band) # [B, base_channels, H/2, W/2]
-        ll_feat = self.ll_processor(ll_proj, d)
-        # Process high-frequency subbands independently:
-        lh_proj = self.subband_proj(lh_band)
-        hl_proj = self.subband_proj(hl_band)
-        hh_proj = self.subband_proj(hh_band)
-        lh_feat_ind = self.hf_indep(lh_proj, d)
-        hl_feat_ind = self.hf_indep(hl_proj, d)
-        hh_feat_ind = self.hf_indep(hh_proj, d)
+        # Process subbands with dedicated projection and processing layers
+        ll_feat = self.ll_processor(self.ll_proj(ll_band), d)
+        lh_feat_ind = self.lh_processor_indep(self.lh_proj(lh_band), d)
+        hl_feat_ind = self.hl_processor_indep(self.hl_proj(hl_band), d)
+        hh_feat_ind = self.hh_processor_indep(self.hh_proj(hh_band), d)
 
         # Intermediate fusion of high-frequency features:
         hf_fused_initial = self.intra_hf_fusion([lh_feat_ind, hl_feat_ind, hh_feat_ind], d)
