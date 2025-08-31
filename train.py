@@ -21,7 +21,7 @@ def train(
     checkpoint_path="models/checkpoint.pth"
 ):
     # loss functions
-    criterion_GAN       = RelativisticLoss(loss_type="RaLSGAN", gradient_penalty=True)
+    criterion_GAN       = RelativisticLoss(loss_type="RaLSGAN", gradient_penalty=False)
     criterion_pixelwise = CharbonnierLoss()
     criterion_SSIM      = SSIM(window_size=11, size_average=True).to(device)
     criterion_spectral  = MultiBandSpectralLoss().to(device)
@@ -102,8 +102,8 @@ def train(
             # Run a fresh forward pass for the generator to build the computation graph
             gen_imgs, d_vec = generator(lr_imgs)
             
-            fake_for_G = discriminator(gen_imgs, d_vec)
-            real_for_G = discriminator(hr_imgs, d_vec)
+            fake_for_G = discriminator(gen_imgs, d_vec.detach())
+            real_for_G = discriminator(hr_imgs, d_vec.detach())
 
             _, loss_GAN = criterion_GAN(real_for_G, fake_for_G)
             loss_pixel = criterion_pixelwise(gen_imgs, hr_imgs)
@@ -217,16 +217,12 @@ if __name__ == "__main__":
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=True, num_workers=12)
 
     # optimizers
-    # optimizer_G = optim.AdamW(generator.parameters(), lr=1e-4, betas=(0.9, 0.999))
-    # optimizer_D = optim.AdamW(discriminator.parameters(), lr=5e-5, betas=(0.9, 0.999))
-    optimizer_G = ApolloM(generator.parameters())
-    optimizer_D = ApolloM(discriminator.parameters())
+    optimizer_G = optim.AdamW(generator.parameters(), lr=1e-4, betas=(0.9, 0.999))
+    optimizer_D = optim.AdamW(discriminator.parameters(), lr=5e-5, betas=(0.9, 0.999))
 
     # schedulers
-    # scheduler_G = optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=200, eta_min=1e-6)
-    # scheduler_D = optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=200, eta_min=1e-6)
-    scheduler_G = None
-    scheduler_D = None
+    scheduler_G = optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=200, eta_min=1e-6)
+    scheduler_D = optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=200, eta_min=1e-6)
 
     try:
         train(
