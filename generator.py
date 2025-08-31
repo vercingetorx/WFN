@@ -342,21 +342,21 @@ class IntraHighFrequencyFusion(nn.Module):
     """
     def __init__(self, channels, num_heads=4, mlp_ratio=4.0, embed_dim=128):
         super(IntraHighFrequencyFusion, self).__init__()
-        self.weights = torch.softmax(nn.Parameter(torch.ones(3)), dim=0)
+        self.logits = nn.Parameter(torch.ones(3))
         self.conv = nn.Conv2d(channels * 3, channels, kernel_size=1)
         self.act = nn.GELU()
-        self.attn = DecoupledBlock(channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, spatial_film=True)
+        self.attn = DecoupledBlock(
+            channels,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            embed_dim=embed_dim,
+            spatial_film=True
+        )
     
     def forward(self, hf_list, d):
+        weights = torch.softmax(self.logits, dim=0)
         # hf_list: list of three tensors, each [B, C, H, W]
-        stacked = torch.cat(hf_list, dim=1)  # [B, 3C, H, W]
-        B, threeC, H, W = stacked.shape
-        C = threeC // 3
-        weighted = []
-        for i in range(3):
-            sub = stacked[:, i * C:(i + 1) * C, :, :]
-            weighted.append(self.weights[i] * sub)
-        fused = torch.cat(weighted, dim=1)
+        fused = torch.cat([w * x for w, x in zip(weights, hf_list)], dim=1)
         fused = self.act(self.conv(fused))
         fused = self.attn(fused, d)
         return fused
@@ -403,11 +403,11 @@ class WaveFusionNet(nn.Module):
         num_hf_indep_blocks=2,
         num_hf_fused_blocks=2,
         num_global_blocks=3,
-        num_hf_indep_ide_freq=2,
-        num_hf_fused_ide_freq=2,
         num_heads=4,
         mlp_ratio=2.0,
         upscale_factor=1,
+        num_hf_indep_ide_freq=2,
+        num_hf_fused_ide_freq=2,
         device="cpu"
     ):
         super(WaveFusionNet, self).__init__()
