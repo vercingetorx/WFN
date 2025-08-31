@@ -516,17 +516,14 @@ def pil_to_tensor_with_augments(source_img, mode="RGB", normalize=True, augmenta
     """
     transform_list = []
 
-    # Apply augmentations
+    # Get random crop
+    if crop_size != (0,0):
+        source_img = get_random_crop(source_img, crop_size=crop_size)
+    
+    # Apply augmentations (which now include downsampling)
     if augmentations:
         source_img, augmented_img = augment_image(source_img, augmentations)
     
-    # Get corresponding random crop
-    if crop_size != (0,0):
-        source_img, augmented_img = get_random_crop_pair(source_img, augmented_img, crop_size=crop_size)
-    
-    # downsample
-    if augmentations and augmentations.downsample > 1:
-        augmented_img = downsample_img_with_random_mode(augmented_img, augmentations.downsample)
     
     # Apply shared transformations if provided
     if augmentations and augmentations.spatial:
@@ -710,48 +707,4 @@ def calculate_psnr(img1, img2, data_range=1.0):
 
 
 if __name__ == "__main__":
-    from generator import WaveFusionNetFFT
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    def init_model(
-        in_channels=3,
-        base_channels=64,
-        num_ll_blocks=4,
-        num_hf_indep_blocks=2,
-        num_hf_fused_blocks=2,
-        num_global_blocks=3,
-        num_heads=4,
-        upscale_factor=1,
-        mlp_ratio=4.0,
-        model_path="models/checkpoint.pth"
-    ):
-        # Load the trained generator model
-        model = WaveFusionNetFFT(
-            in_channels=in_channels,
-            base_channels=base_channels, 
-            num_ll_blocks=num_ll_blocks,
-            num_hf_indep_blocks=num_hf_indep_blocks,
-            num_hf_fused_blocks=num_hf_fused_blocks,
-            num_global_blocks=num_global_blocks,
-            num_heads=num_heads,
-            upscale_factor=upscale_factor,
-            mlp_ratio=mlp_ratio
-        )
-        checkpoint = torch.load(model_path, weights_only=True, map_location=device)
-        model.load_state_dict(checkpoint["generator_state_dict"])
-        model.eval()
-        model.to(device)
-        return model
-    
-    model = init_model(
-        base_channels=128,
-        num_ll_blocks=6,
-        num_hf_indep_blocks=6,
-        num_hf_fused_blocks=6,
-        num_global_blocks=6,
-        num_heads=16,
-        upscale_factor=2
-    )
-
-    export_to_onnx(model)
+    pass
