@@ -76,14 +76,14 @@ class PUM(nn.Module):
         num_upsamples = int(math.log2(upscale_factor))
         for _ in range(num_upsamples):
             layers.extend([
-                nn.Conv2d(in_channels, in_channels * 4, kernel_size=3, padding=1),
+                nn.Conv2d(in_channels, in_channels * 4, kernel_size=3, padding=1, padding_mode="reflect"),
                 nn.PixelShuffle(2),
                 nn.GELU(),
                 SpatialWaveNetwork(in_channels, num_heads=num_heads, mlp_ratio=mlp_ratio),
                 ImplicitDetailEnhancer(in_channels, mlp_ratio=mlp_ratio)
             ])
         self.layers = nn.Sequential(*layers)
-        self.final_conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.final_conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode="reflect")
 
     def forward(self, x):
         x = self.layers(x)
@@ -100,9 +100,9 @@ class MSFEM(nn.Module):
     """
     def __init__(self, in_channels, out_channels):
         super(MSFEM, self).__init__()
-        self.conv3 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.conv5 = nn.Conv2d(in_channels, out_channels, kernel_size=5, padding=2)
-        self.conv7 = nn.Conv2d(in_channels, out_channels, kernel_size=7, padding=3)
+        self.conv3 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, padding_mode="reflect")
+        self.conv5 = nn.Conv2d(in_channels, out_channels, kernel_size=5, padding=2, padding_mode="reflect")
+        self.conv7 = nn.Conv2d(in_channels, out_channels, kernel_size=7, padding=3, padding_mode="reflect")
         self.dilated_conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=2, dilation=2)
         self.activation = nn.GELU()
         self.fusion = nn.Conv2d(out_channels * 4, out_channels, kernel_size=1)
@@ -342,7 +342,7 @@ class IntraHighFrequencyFusion(nn.Module):
     """
     def __init__(self, channels, num_heads=4, mlp_ratio=4.0, embed_dim=128):
         super(IntraHighFrequencyFusion, self).__init__()
-        self.weights = nn.Parameter(torch.ones(3))
+        self.weights = torch.softmax(nn.Parameter(torch.ones(3)), dim=0)
         self.conv = nn.Conv2d(channels * 3, channels, kernel_size=1)
         self.act = nn.GELU()
         self.attn = DecoupledBlock(channels, num_heads=num_heads, mlp_ratio=mlp_ratio, embed_dim=embed_dim, spatial_film=True)
@@ -462,12 +462,12 @@ class WaveFusionNet(nn.Module):
         else:
             self.upsample = nn.Sequential(
                 ImplicitDetailEnhancer(base_channels, mlp_ratio=mlp_ratio),
-                nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1)
+                nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1, padding_mode="reflect")
             )
             self.global_residual = nn.Identity()
 
         # Map features to wavelet coefficient space (expects 4 * in_channels channels)
-        self.out_conv = nn.Conv2d(base_channels, in_channels * 4, kernel_size=3, padding=1)
+        self.out_conv = nn.Conv2d(base_channels, in_channels * 4, kernel_size=3, padding=1, padding_mode="reflect")
         self.act = nn.Tanh()
         self.alpha = nn.Parameter(torch.ones(1))
 
@@ -535,5 +535,5 @@ if __name__ == "__main__":
     )
     model.to(device)
     dummy_input = torch.randn(1, 3, 64, 64, device=device)
-    output = model(dummy_input)
+    output, d = model(dummy_input)
     print("Output shape:", output.shape)
