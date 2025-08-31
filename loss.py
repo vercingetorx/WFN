@@ -402,100 +402,68 @@ class HingeLossD(nn.Module):
 
 
 class RelativisticLoss(nn.Module):
-    def __init__(self, loss_type='RaGAN', gradient_penalty=False, gp_weight=10.0):
-        """
-        Relativistic Loss for GANs.
-
-        Args:
-            loss_type (str): Type of relativistic loss to use:
-                - 'RaGAN' (Standard Relativistic average GAN)
-                - 'RaLSGAN' (Relativistic average Least Squares GAN)
-                - 'RaHingeGAN' (Relativistic average Hinge GAN - not formally defined, but can be useful)
-            gradient_penalty (bool): Whether to use gradient penalty (for RaGAN-GP).
-            gp_weight (float): Weight of the gradient penalty.
-
-        Notes:
-            - does NOT need to be on the same device as model
-        """
-        super(RelativisticLoss, self).__init__()
+    def __init__(self, loss_type='RaLSGAN', gradient_penalty=False, gp_weight=10.0):
+        super().__init__()
+        assert loss_type in ('RaGAN','RaLSGAN','RaHingeGAN')
         self.loss_type = loss_type
         self.gradient_penalty = gradient_penalty
         self.gp_weight = gp_weight
 
-    def forward(self, real_pred, fake_pred, discriminator=None, real_data=None, fake_data=None, d_vec=None):
-        """
-        Calculates the relativistic loss.
+    # --------- D PHASE ----------
+    def d_loss(self, real_pred, fake_pred, discriminator=None, real_data=None, fake_data=None, d_vec=None):
+        r_mean = real_pred.mean()
+        f_mean = fake_pred.mean()
 
-        Args:
-            real_pred (Tensor): Discriminator output for real data.
-            fake_pred (Tensor): Discriminator output for generated data.
-            discriminator (nn.Module, optional): Discriminator model (required for gradient penalty).
-            real_data (Tensor, optional): Real data (required for gradient penalty).
-            fake_data (Tensor, optional): Generated data (required for gradient penalty).
+        if self.loss_type == 'RaLSGAN':
+            loss = 0.5 * ((real_pred - f_mean - 1) ** 2).mean() + \
+                   0.5 * ((fake_pred - r_mean + 1) ** 2).mean()
+        elif self.loss_type == 'RaGAN':
+            loss = F.softplus(-(real_pred - f_mean)).mean() + \
+                   F.softplus( (fake_pred - r_mean)).mean()
+        else:  # RaHingeGAN
+            loss = F.relu(1.0 - (real_pred - f_mean)).mean() + \
+                   F.relu(1.0 + (fake_pred - r_mean)).mean()
 
-        Returns:
-            Tensor: Discriminator loss.
-            Tensor: Generator loss.
-        """
-        # Calculate average predictions
-        real_pred_hat = real_pred - torch.mean(fake_pred)
-        fake_pred_hat = fake_pred - torch.mean(real_pred)
+        if self.gradient_penalty:
+            assert discriminator is not None and real_data is not None and fake_data is not None
+            d_const = None if d_vec is None else d_vec.detach()
+            gp = self.compute_gradient_penalty(discriminator, real_data, fake_data, d_const)
+            loss = loss + self.gp_weight * gp
+        return loss
 
-        if self.loss_type == 'RaGAN':
-            # Standard RaGAN loss (gradient_penalty recommended)
-            discriminator_loss = torch.mean(F.relu(1.0 - real_pred_hat)) + torch.mean(F.relu(1.0 + fake_pred_hat))
-            generator_loss = torch.mean(F.relu(1.0 + real_pred_hat)) + torch.mean(F.relu(1.0 - fake_pred_hat))
-        elif self.loss_type == 'RaLSGAN':
-            # RaLSGAN loss (gradient_penalty highly recommended)
-            discriminator_loss = 0.5 * (torch.mean((real_pred_hat - 1)**2) + torch.mean(fake_pred_hat**2))
-            generator_loss = 0.5 * (torch.mean(real_pred_hat**2) + torch.mean((fake_pred_hat - 1)**2))
-        elif self.loss_type == 'RaHingeGAN':
-            # RaHingeGAN loss (gradient_penalty optional but beneficial)
-            discriminator_loss = torch.mean(F.relu(1.0 - real_pred_hat)) + torch.mean(F.relu(1.0 + fake_pred_hat))
-            generator_loss = torch.mean(F.relu(1.0 - fake_pred_hat))
-        else:
-            raise ValueError(f"Invalid loss_type: {self.loss_type}")
+    # --------- G PHASE ----------
+    def g_loss(self, real_pred_const, fake_pred):
+        # Real logits must be constants for G
+        real_pred_const = real_pred_const.detach()
+        r_mean = real_pred_const.mean()
+        f_mean = fake_pred.mean()
 
-        # Gradient Penalty (for RaGAN-GP)
-        if self.gradient_penalty and discriminator is not None and real_data is not None and fake_data is not None:
-            # raise ValueError("Discriminator, real_data, and fake_data are required for gradient penalty")
-            gradient_penalty = self.compute_gradient_penalty(discriminator, real_data, fake_data, d_vec)
-            discriminator_loss += self.gp_weight * gradient_penalty
+        if self.loss_type == 'RaLSGAN':
+            loss = 0.5 * ((real_pred_const - f_mean + 1) ** 2).mean() + \
+                   0.5 * ((fake_pred - r_mean - 1) ** 2).mean()
+        elif self.loss_type == 'RaGAN':
+            loss = F.softplus( (real_pred_const - f_mean)).mean() + \
+                   F.softplus(-(fake_pred - r_mean)).mean()
+        else:  # RaHingeGAN
+            loss = F.relu(1.0 + (real_pred_const - f_mean)).mean() + \
+                   F.relu(1.0 - (fake_pred - r_mean)).mean()
+        return loss
 
-        return discriminator_loss, generator_loss
+    # --------- GP helper ----------
+    def compute_gradient_penalty(self, discriminator, real_data, fake_data, d_vec_const):
+        b = real_data.size(0)
+        alpha = torch.rand(b, 1, 1, 1, device=real_data.device)
+        interpolated = (alpha * real_data + (1 - alpha) * fake_data).requires_grad_(True)
+        pred = discriminator(interpolated, d_vec_const)
+        grad = torch.autograd.grad(
+            outputs=pred, inputs=interpolated,
+            grad_outputs=torch.ones_like(pred),
+            create_graph=True, retain_graph=True, only_inputs=True
+        )[0]
+        grad = grad.view(b, -1)
+        return ((grad.norm(2, dim=1) - 1) ** 2).mean()
 
-    def compute_gradient_penalty(self, discriminator, real_data, fake_data, d_vec):
-        """
-        Calculates the gradient penalty for RaGAN-GP.
 
-        Args:
-            discriminator (nn.Module): Discriminator model.
-            real_data (Tensor): Real data.
-            fake_data (Tensor): Generated data.
-
-        Returns:
-            Tensor: Gradient penalty.
-        """
-        batch_size = real_data.size(0)
-        alpha = torch.rand(batch_size, 1, 1, 1, device=real_data.device)  # Assuming image data
-        alpha = alpha.expand_as(real_data)
-
-        interpolated = alpha * real_data + (1 - alpha) * fake_data
-        interpolated.requires_grad_(True)
-
-        # Calculate discriminator output for interpolated data
-        pred_interpolated = discriminator(interpolated, d_vec)
-
-        # Calculate gradients of probabilities with respect to examples
-        gradients = torch.autograd.grad(outputs=pred_interpolated, inputs=interpolated,
-                                        grad_outputs=torch.ones_like(pred_interpolated),
-                                        create_graph=True, retain_graph=True)[0]
-
-        # Compute gradient penalty
-        gradients = gradients.view(batch_size, -1)
-        gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
-
-        return gradient_penalty
 
 ####### MISC #######
 
