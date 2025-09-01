@@ -114,7 +114,7 @@ class InterferenceAggregation(nn.Module):
 
     def forward(self, w):
         # Channel-wise decay factors
-        decay = torch.exp(-self.gamma * self.dist_kernel.to(w.device))
+        decay = torch.exp(-self.gamma * self.dist_kernel)
         
         # Depthwise convolution for interference pattern
         aggregated = F.conv2d(w.abs(), decay, 
