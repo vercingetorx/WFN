@@ -21,7 +21,7 @@ def train(
     checkpoint_path="models/checkpoint.pth"
 ):
     # loss functions
-    criterion_GAN       = RelativisticLoss(loss_type="RaLSGAN", gradient_penalty=True)
+    criterion_GAN       = RelativisticLoss(loss_type="RaLSGAN", gradient_penalty=False)
     criterion_pixelwise = CharbonnierLoss()
     criterion_SSIM      = SSIM(window_size=11, size_average=True).to(device)
     criterion_spectral  = MultiBandSpectralLoss().to(device)
@@ -33,10 +33,9 @@ def train(
     lambda_SSIM     = 0.20
     lambda_spectral = 0.10
     lambda_gradient = 0.05
-    lambda_GAN      = LambdaRamp(
-        ramp_epochs=25, start_epoch=10,
-        start_weight=0.01, end_weight=0.10
+    lambda_GAN      = LambdaRamp(ramp_epochs=25, start_weight=0.01, end_weight=0.10
     )
+    freq_ramp       = LambdaRamp(ramp_epochs=20, start_weight=0.0, end_weight=0.15)
 
     # load checkpoint if it exists
     if os.path.exists(checkpoint_path):
@@ -67,83 +66,82 @@ def train(
             hr_imgs = hr_imgs.to(device)
             lr_imgs = lr_imgs.to(device)
 
-            # --------------------------------
-            #  PHASE 1: Train Discriminator
-            # --------------------------------
-            
-            # Freeze generator parameters to save computation
-            for p in generator.parameters(): p.requires_grad = False
+            # -----------------------------
+            # PHASE 1: Train Discriminator
+            # -----------------------------
+            for p in generator.parameters():     p.requires_grad = False
             for p in discriminator.parameters(): p.requires_grad = True
 
-            # Use torch.no_grad() for generator's forward pass in D's training phase
             with torch.no_grad():
-                gen_imgs, d_vec = generator(lr_imgs)
+                gen_imgs_D, d_vec_D = generator(lr_imgs)  # no graph for D phase
 
-            real_output = discriminator(hr_imgs, d_vec.detach())
-            fake_output = discriminator(gen_imgs.detach(), d_vec.detach())
-            
-            loss_D, _ = criterion_GAN(
-                real_output, fake_output,
-                discriminator,
-                hr_imgs, gen_imgs.detach(), d_vec.detach()
+            real_out = discriminator(hr_imgs,             d_vec_D.detach())
+            fake_out = discriminator(gen_imgs_D.detach(), d_vec_D.detach())
+
+            # Only pass GP extras if it's enabled
+            loss_D = criterion_GAN.d_loss(
+                real_out, fake_out,
+                discriminator=discriminator if criterion_GAN.gradient_penalty else None,
+                real_data=hr_imgs            if criterion_GAN.gradient_penalty else None,
+                fake_data=gen_imgs_D.detach() if criterion_GAN.gradient_penalty else None,
+                d_vec=d_vec_D.detach()       if criterion_GAN.gradient_penalty else None
             )
-            loss_D = loss_D / accumulation_steps
-            loss_D.backward() 
+
+            (loss_D / accumulation_steps).backward()
             epoch_loss_D += loss_D.item()
 
-            # --------------------------------
-            #  PHASE 2: Train Generator
-            # --------------------------------
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataloader):
+                optimizer_D.step()
+                optimizer_D.zero_grad(set_to_none=True)
 
-            # Freeze discriminator parameters so only generator's gradients are computed
-            for p in generator.parameters(): p.requires_grad = True
+            # -----------------------------
+            # PHASE 2: Train Generator
+            # -----------------------------
+            for p in generator.parameters():     p.requires_grad = True
             for p in discriminator.parameters(): p.requires_grad = False
 
-            # Run a fresh forward pass for the generator to build the computation graph
             gen_imgs, d_vec = generator(lr_imgs)
-            
-            fake_for_G = discriminator(gen_imgs, d_vec)
-            real_for_G = discriminator(hr_imgs, d_vec)
 
-            _, loss_GAN = criterion_GAN(real_for_G, fake_for_G)
-            loss_pixel = criterion_pixelwise(gen_imgs, hr_imgs)
-            loss_SSIM = criterion_SSIM(gen_imgs, hr_imgs)
+            # Real path is a constant for G’s loss (don’t build/keep D graph on real)
+            with torch.no_grad():
+                real_for_G = discriminator(hr_imgs, d_vec)
+            fake_for_G = discriminator(gen_imgs, d_vec)
+
+            loss_GAN      = criterion_GAN.g_loss(real_for_G, fake_for_G)
+            loss_pixel    = criterion_pixelwise(gen_imgs, hr_imgs)
+            loss_SSIM     = criterion_SSIM(gen_imgs, hr_imgs)         # value_range=2 works for [-1,1]
             loss_spectral = criterion_spectral(gen_imgs, hr_imgs)
             loss_gradient = criterion_gradient(gen_imgs, hr_imgs)
 
-            loss_G = (
-                lambda_GAN * loss_GAN +
-                lambda_pixel * loss_pixel +
-                lambda_SSIM * loss_SSIM +
-                lambda_spectral * loss_spectral +
-                lambda_gradient * loss_gradient
+            loss_G_total = (
+                lambda_GAN * loss_GAN
+                + lambda_pixel    * loss_pixel
+                + lambda_SSIM     * loss_SSIM
+                + lambda_spectral * loss_spectral
+                + lambda_gradient * loss_gradient
             )
-            
-            loss_G = loss_G / accumulation_steps
-            loss_G.backward() 
-            epoch_loss_G += loss_G.item()
-            
-            # --------------------------------
-            #  PHASE 3: Update Weights
-            # --------------------------------
-            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataloader):
-                optimizer_D.step()
-                optimizer_G.step()
-                
-                optimizer_D.zero_grad()
-                optimizer_G.zero_grad()
 
-            # --- PSNR Calculation ---
-            batch_psnr = 0.0
-            for j in range(len(hr_imgs)):
-                # Assuming images are in [-1, 1] or [0, 1] range
-                batch_psnr += calculate_psnr(gen_imgs[j], hr_imgs[j], data_range=2.0)
-            epoch_psnr += batch_psnr / len(hr_imgs)
+            (loss_G_total / accumulation_steps).backward()
+            epoch_loss_G += loss_G_total.item()
+
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataloader):
+                optimizer_G.step()
+                optimizer_G.zero_grad(set_to_none=True)
+
+            # --- PSNR (no grad) ---
+            with torch.no_grad():
+                batch_psnr = 0.0
+                for j in range(len(hr_imgs)):
+                    batch_psnr += calculate_psnr(gen_imgs[j].detach(), hr_imgs[j].detach(), data_range=2.0)
+                epoch_psnr += batch_psnr / len(hr_imgs)
         
         if scheduler_G: scheduler_G.step()
         if scheduler_D: scheduler_D.step()
 
+        # step ramps
         lambda_GAN.step()
+        discriminator.lambda_freq = float(freq_ramp)
+        freq_ramp.step()
 
         avg_loss_G = epoch_loss_G / len(dataloader) * accumulation_steps
         avg_loss_D = epoch_loss_D / len(dataloader) * accumulation_steps
@@ -217,16 +215,12 @@ if __name__ == "__main__":
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=True, num_workers=12)
 
     # optimizers
-    # optimizer_G = optim.AdamW(generator.parameters(), lr=1e-4, betas=(0.9, 0.999))
-    # optimizer_D = optim.AdamW(discriminator.parameters(), lr=5e-5, betas=(0.9, 0.999))
-    optimizer_G = ApolloM(generator.parameters())
-    optimizer_D = ApolloM(discriminator.parameters())
+    optimizer_G = optim.AdamW(generator.parameters(), lr=1e-3, betas=(0.9, 0.999))
+    optimizer_D = optim.AdamW(discriminator.parameters(), lr=1e-4, betas=(0.9, 0.999))
 
     # schedulers
-    # scheduler_G = optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=200, eta_min=1e-6)
-    # scheduler_D = optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=200, eta_min=1e-6)
-    scheduler_G = None
-    scheduler_D = None
+    scheduler_G = optim.lr_scheduler.CosineAnnealingLR(optimizer_G, T_max=500, eta_min=1e-6)
+    scheduler_D = optim.lr_scheduler.CosineAnnealingLR(optimizer_D, T_max=500, eta_min=1e-6)
 
     try:
         train(
@@ -234,7 +228,7 @@ if __name__ == "__main__":
             generator, discriminator,
             optimizer_G, optimizer_D,
             scheduler_G, scheduler_D,
-            num_epochs=200,
+            num_epochs=500,
             save_interval=10,
             sample_interval=1,
             accumulation_steps=12
